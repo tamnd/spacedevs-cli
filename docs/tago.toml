@@ -1,6 +1,6 @@
 title       = "spacedevs"
 baseURL     = "https://spacedevs-cli.tamnd.com/"
-description = "A command line for spacedevs."
+description = "Space launch and astronaut data from The Space Devs Launch Library 2."
 contentDir  = "content"
 outputDir   = "public"
 theme       = "tago-doks"
