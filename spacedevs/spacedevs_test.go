@@ -16,6 +16,13 @@ func newTestClient(ts *httptest.Server) *Client {
 	return c
 }
 
+func mustEncode(t *testing.T, w http.ResponseWriter, v interface{}) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Errorf("encode response: %v", err)
+	}
+}
+
 func TestGet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") == "" {
@@ -72,7 +79,7 @@ func TestGetRetriesOn503(t *testing.T) {
 func TestListUpcoming(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		mustEncode(t, w, map[string]interface{}{
 			"count": 366,
 			"results": []map[string]interface{}{
 				{
@@ -147,7 +154,7 @@ func TestListUpcoming(t *testing.T) {
 func TestListLaunches(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		mustEncode(t, w, map[string]interface{}{
 			"count": 7900,
 			"results": []map[string]interface{}{
 				{
@@ -182,7 +189,7 @@ func TestListLaunches(t *testing.T) {
 func TestListAstronauts(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		mustEncode(t, w, map[string]interface{}{
 			"count": 858,
 			"results": []map[string]interface{}{
 				{
@@ -230,7 +237,7 @@ func TestListAstronauts(t *testing.T) {
 func TestListAgencies(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		mustEncode(t, w, map[string]interface{}{
 			"count": 50,
 			"results": []map[string]interface{}{
 				{
@@ -270,7 +277,7 @@ func TestListAgencies(t *testing.T) {
 func TestListSpacecraft(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		mustEncode(t, w, map[string]interface{}{
 			"count": 606,
 			"results": []map[string]interface{}{
 				{
