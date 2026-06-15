@@ -1,200 +1,311 @@
-// Package spacedevs is the library behind the spacedevs command line:
-// the HTTP client, request shaping, and the typed data models for spacedevs.
-//
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
 package spacedevs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"regexp"
-	"strings"
-	"time"
+	"net/url"
 )
 
-// DefaultUserAgent identifies the client to spacedevs. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "spacedevs/dev (+https://github.com/tamnd/spacedevs-cli)"
+// --- Output types ---
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at spacedevs.com; change it once you
-// know the real endpoints you want to read.
-const Host = "spacedevs.com"
-
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
-
-// Client talks to spacedevs over HTTP.
-type Client struct {
-	HTTP      *http.Client
-	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
-
-	last time.Time
+// Launch is a rocket launch event.
+type Launch struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	NET         string `json:"net"`
+	WindowStart string `json:"window_start"`
+	WindowEnd   string `json:"window_end"`
+	Probability int    `json:"probability"`
+	Rocket      string `json:"rocket"`
+	Mission     string `json:"mission"`
+	MissionType string `json:"mission_type"`
+	Orbit       string `json:"orbit"`
+	Pad         string `json:"pad"`
+	Location    string `json:"location"`
+	Provider    string `json:"provider"`
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
-	}
+// Astronaut is a space traveler record.
+type Astronaut struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Agency      string `json:"agency"`
+	Nationality string `json:"nationality"`
+	DOB         string `json:"dob"`
+	FlightCount int    `json:"flight_count"`
+	Bio         string `json:"bio"`
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff(attempt)):
-			}
-		}
-		body, retry, err := c.do(ctx, url)
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		if !retry {
-			return nil, err
-		}
-	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+// Agency is a space agency or organization.
+type Agency struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Abbrev      string `json:"abbrev"`
+	Type        string `json:"type"`
+	CountryCode string `json:"country_code"`
+	Website     string `json:"website"`
+	Description string `json:"description"`
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
-	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	req.Header.Set("User-Agent", c.UserAgent)
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, true, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return nil, true, fmt.Errorf("http %d", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("http %d", resp.StatusCode)
-	}
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, true, err
-	}
-	return b, false, nil
+// Spacecraft is a spacecraft record.
+type Spacecraft struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Type        string `json:"type"`
+	Agency      string `json:"agency"`
+	Description string `json:"description"`
 }
 
-// pace blocks until at least Rate has passed since the previous request.
-func (c *Client) pace() {
-	if c.Rate <= 0 {
-		return
-	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
-		time.Sleep(wait)
-	}
-	c.last = time.Now()
+// --- Wire types ---
+
+type wirePage[T any] struct {
+	Count   int `json:"count"`
+	Results []T `json:"results"`
 }
 
-func backoff(attempt int) time.Duration {
-	d := time.Duration(attempt) * 500 * time.Millisecond
-	if d > 5*time.Second {
-		d = 5 * time.Second
+type wireLaunch struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status struct {
+		Name string `json:"name"`
+	} `json:"status"`
+	NET         string `json:"net"`
+	WindowStart string `json:"window_start"`
+	WindowEnd   string `json:"window_end"`
+	Probability *int   `json:"probability"`
+	Rocket      *struct {
+		Configuration struct {
+			Name string `json:"name"`
+		} `json:"configuration"`
+	} `json:"rocket"`
+	Mission *struct {
+		Name  string `json:"name"`
+		Type  string `json:"type"`
+		Orbit *struct {
+			Abbrev string `json:"abbrev"`
+		} `json:"orbit"`
+	} `json:"mission"`
+	Pad *struct {
+		Name     string `json:"name"`
+		Location struct {
+			Name string `json:"name"`
+		} `json:"location"`
+	} `json:"pad"`
+	LaunchServiceProvider struct {
+		Name string `json:"name"`
+	} `json:"launch_service_provider"`
+}
+
+type wireAstronaut struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Status struct {
+		Name string `json:"name"`
+	} `json:"status"`
+	Agency struct {
+		Name string `json:"name"`
+	} `json:"agency"`
+	Nationality string `json:"nationality"`
+	DateOfBirth string `json:"date_of_birth"`
+	FlightCount int    `json:"flights_count"`
+	Bio         string `json:"bio"`
+}
+
+type wireAgency struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Abbrev      string `json:"abbrev"`
+	Type        string `json:"type"`
+	CountryCode string `json:"country_code"`
+	Website     string `json:"website"`
+	Description string `json:"description"`
+}
+
+type wireSpacecraft struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Status struct {
+		Name string `json:"name"`
+	} `json:"status"`
+	SpacecraftConfig *struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"type"`
+		Agency struct {
+			Name string `json:"name"`
+		} `json:"agency"`
+		Description string `json:"description"`
+	} `json:"spacecraft_config"`
+}
+
+// --- Client methods ---
+
+// ListUpcoming returns upcoming rocket launches.
+func (c *Client) ListUpcoming(ctx context.Context, limit int, search string) ([]*Launch, error) {
+	return c.listLaunches(ctx, "/launch/upcoming/", limit, search)
+}
+
+// ListLaunches returns all launches (past and upcoming).
+func (c *Client) ListLaunches(ctx context.Context, limit int, search string) ([]*Launch, error) {
+	return c.listLaunches(ctx, "/launch/", limit, search)
+}
+
+func (c *Client) listLaunches(ctx context.Context, path string, limit int, search string) ([]*Launch, error) {
+	q := url.Values{"format": {"json"}}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
 	}
-	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on spacedevs.com. It is a stand-in for the typed records you
-// will model from the real spacedevs endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `spacedevs cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+	if search != "" {
+		q.Set("search", search)
+	}
+	endpoint := c.BaseURL + path + "?" + q.Encode()
+	body, err := c.Get(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var page wirePage[wireLaunch]
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse launches: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]*Launch, 0, len(page.Results))
+	for _, w := range page.Results {
+		out = append(out, convertLaunch(w))
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
+func convertLaunch(w wireLaunch) *Launch {
+	l := &Launch{
+		ID:          w.ID,
+		Name:        w.Name,
+		Status:      w.Status.Name,
+		NET:         w.NET,
+		WindowStart: w.WindowStart,
+		WindowEnd:   w.WindowEnd,
+		Provider:    w.LaunchServiceProvider.Name,
+	}
+	if w.Probability != nil {
+		l.Probability = *w.Probability
+	}
+	if w.Rocket != nil {
+		l.Rocket = w.Rocket.Configuration.Name
+	}
+	if w.Mission != nil {
+		l.Mission = w.Mission.Name
+		l.MissionType = w.Mission.Type
+		if w.Mission.Orbit != nil {
+			l.Orbit = w.Mission.Orbit.Abbrev
 		}
 	}
-	return out
+	if w.Pad != nil {
+		l.Pad = w.Pad.Name
+		l.Location = w.Pad.Location.Name
+	}
+	return l
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// ListAstronauts returns astronauts/space travelers.
+func (c *Client) ListAstronauts(ctx context.Context, limit int, search string) ([]*Astronaut, error) {
+	q := url.Values{"format": {"json"}}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
 	}
-	return s
+	if search != "" {
+		q.Set("search", search)
+	}
+	endpoint := c.BaseURL + "/astronaut/?" + q.Encode()
+	body, err := c.Get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var page wirePage[wireAstronaut]
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse astronauts: %w", err)
+	}
+	out := make([]*Astronaut, 0, len(page.Results))
+	for _, w := range page.Results {
+		out = append(out, &Astronaut{
+			ID:          w.ID,
+			Name:        w.Name,
+			Status:      w.Status.Name,
+			Agency:      w.Agency.Name,
+			Nationality: w.Nationality,
+			DOB:         w.DateOfBirth,
+			FlightCount: w.FlightCount,
+			Bio:         w.Bio,
+		})
+	}
+	return out, nil
+}
+
+// ListAgencies returns space agencies and organizations.
+func (c *Client) ListAgencies(ctx context.Context, limit int, agencyType string) ([]*Agency, error) {
+	q := url.Values{"format": {"json"}}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	if agencyType != "" {
+		q.Set("type", agencyType)
+	}
+	endpoint := c.BaseURL + "/agency/?" + q.Encode()
+	body, err := c.Get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var page wirePage[wireAgency]
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse agencies: %w", err)
+	}
+	out := make([]*Agency, 0, len(page.Results))
+	for _, w := range page.Results {
+		out = append(out, &Agency{
+			ID:          w.ID,
+			Name:        w.Name,
+			Abbrev:      w.Abbrev,
+			Type:        w.Type,
+			CountryCode: w.CountryCode,
+			Website:     w.Website,
+			Description: w.Description,
+		})
+	}
+	return out, nil
+}
+
+// ListSpacecraft returns spacecraft records.
+func (c *Client) ListSpacecraft(ctx context.Context, limit int, search string) ([]*Spacecraft, error) {
+	q := url.Values{"format": {"json"}}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	if search != "" {
+		q.Set("search", search)
+	}
+	endpoint := c.BaseURL + "/spacecraft/?" + q.Encode()
+	body, err := c.Get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var page wirePage[wireSpacecraft]
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse spacecraft: %w", err)
+	}
+	out := make([]*Spacecraft, 0, len(page.Results))
+	for _, w := range page.Results {
+		sc := &Spacecraft{
+			ID:     w.ID,
+			Name:   w.Name,
+			Status: w.Status.Name,
+		}
+		if w.SpacecraftConfig != nil {
+			sc.Type = w.SpacecraftConfig.Type.Name
+			sc.Agency = w.SpacecraftConfig.Agency.Name
+			sc.Description = w.SpacecraftConfig.Description
+		}
+		out = append(out, sc)
+	}
+	return out, nil
 }

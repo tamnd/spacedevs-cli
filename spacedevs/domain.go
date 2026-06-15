@@ -2,14 +2,11 @@ package spacedevs
 
 import (
 	"context"
-	"net/url"
-	"strings"
 
 	"github.com/tamnd/any-cli/kit"
-	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes spacedevs as a kit Domain: a driver that a multi-domain
+// domain.go exposes The Space Devs as a kit Domain: a driver that a multi-domain
 // host (ant) enables with a single blank import,
 //
 //	import _ "github.com/tamnd/spacedevs-cli/spacedevs"
@@ -19,12 +16,9 @@ import (
 // spacedevs:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone spacedevs binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
-// Domain is the spacedevs driver. It carries no state; the per-run client is
+// Domain is the Space Devs driver. It carries no state; the per-run client is
 // built by the factory Register hands kit.
 type Domain struct{}
 
@@ -36,40 +30,36 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "spacedevs",
-			Short:  "A command line for spacedevs.",
-			Long: `A command line for spacedevs.
+			Short:  "Space launch and astronaut data from The Space Devs Launch Library 2",
+			Long: `Space launch and astronaut data from The Space Devs Launch Library 2.
 
-spacedevs reads public spacedevs data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+spacedevs reads public data from ll.thespacedevs.com (no API key required),
+shapes it into clean records, and prints output that pipes into the rest of
+your tools. Browse upcoming launches, search the astronaut database, explore
+spacecraft and agencies.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/spacedevs-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `spacedevs page` and
-	// `ant get spacedevs://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
-
-	// List op: members of a page, the home of `spacedevs links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// spacedevs://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{Name: "upcoming", Group: "read", List: true,
+		Summary: "Upcoming rocket launches"}, listUpcoming)
+	kit.Handle(app, kit.OpMeta{Name: "launches", Group: "read", List: true,
+		Summary: "All launches (past and upcoming)"}, listLaunches)
+	kit.Handle(app, kit.OpMeta{Name: "astronauts", Group: "read", List: true,
+		Summary: "Space travelers database"}, listAstronauts)
+	kit.Handle(app, kit.OpMeta{Name: "agencies", Group: "read", List: true,
+		Summary: "Space agencies and organizations"}, listAgencies)
+	kit.Handle(app, kit.OpMeta{Name: "spacecraft", Group: "read", List: true,
+		Summary: "Spacecraft catalog"}, listSpacecraft)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -88,86 +78,83 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type listInput struct {
+	Search string  `kit:"flag" help:"search term"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type agencyInput struct {
+	Search string  `kit:"flag" help:"search term"`
+	Type   string  `kit:"flag" help:"agency type (Government, Commercial, Educational)"`
 	Limit  int     `kit:"flag,inherit" help:"max results"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func listUpcoming(ctx context.Context, in listInput, emit func(*Launch) error) error {
+	launches, err := in.Client.ListUpcoming(ctx, in.Limit, in.Search)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, l := range launches {
+		if err := emit(l); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full spacedevs.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized spacedevs reference: %q", input)
+func listLaunches(ctx context.Context, in listInput, emit func(*Launch) error) error {
+	launches, err := in.Client.ListLaunches(ctx, in.Limit, in.Search)
+	if err != nil {
+		return err
 	}
-	return "page", id, nil
+	for _, l := range launches {
+		if err := emit(l); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Locate is the inverse: the live https URL for a (type, id).
-func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
-		return "", errs.Usage("spacedevs has no resource type %q", uriType)
+func listAstronauts(ctx context.Context, in listInput, emit func(*Astronaut) error) error {
+	astronauts, err := in.Client.ListAstronauts(ctx, in.Limit, in.Search)
+	if err != nil {
+		return err
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
+	for _, a := range astronauts {
+		if err := emit(a); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+func listAgencies(ctx context.Context, in agencyInput, emit func(*Agency) error) error {
+	agencies, err := in.Client.ListAgencies(ctx, in.Limit, in.Type)
+	if err != nil {
+		return err
 	}
-	return strings.Trim(input, "/")
+	for _, a := range agencies {
+		if err := emit(a); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
-func mapErr(err error) error {
-	return err
+func listSpacecraft(ctx context.Context, in listInput, emit func(*Spacecraft) error) error {
+	spacecraft, err := in.Client.ListSpacecraft(ctx, in.Limit, in.Search)
+	if err != nil {
+		return err
+	}
+	for _, s := range spacecraft {
+		if err := emit(s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
